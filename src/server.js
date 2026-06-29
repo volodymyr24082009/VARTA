@@ -337,6 +337,65 @@ async function initDb() {
     );
   `);
 
+  // ---- Таблиці системи (див. схему "7. СИСТЕМА") ----
+  // Дипломи переможців
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS diplomas (
+      id             SERIAL PRIMARY KEY,
+      competition_id INTEGER REFERENCES competitions(id) ON DELETE CASCADE,
+      student_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      application_id INTEGER REFERENCES applications(id) ON DELETE SET NULL,
+      place          INTEGER,
+      score          NUMERIC(5,2),
+      file_url       VARCHAR(512),
+      issued_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
+  // Протоколи конкурсів (підсумкові відомості)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS protocols (
+      id             SERIAL PRIMARY KEY,
+      competition_id INTEGER REFERENCES competitions(id) ON DELETE CASCADE,
+      file_url       VARCHAR(512),
+      data_json      JSONB,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
+  // Архів матеріалів (дипломи, протоколи, конкурси тощо)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS archive_items (
+      id           SERIAL PRIMARY KEY,
+      type         VARCHAR(40) NOT NULL,
+      related_id   INTEGER,
+      title        VARCHAR(255),
+      file_url     VARCHAR(512),
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
+  // Статистичні зрізи
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS statistics (
+      id           SERIAL PRIMARY KEY,
+      type         VARCHAR(40) NOT NULL,
+      data_json    JSONB,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
+  // Сповіщення користувачів
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id           SERIAL PRIMARY KEY,
+      user_id      INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      message      TEXT NOT NULL,
+      is_read      BOOLEAN NOT NULL DEFAULT false,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
   // ---- Універсальний адміністратор ----
   const adminEmail = (process.env.ADMIN_EMAIL || "admin@varta.com").toLowerCase();
   const adminPassword = process.env.ADMIN_PASSWORD || "C240809v";
@@ -358,6 +417,30 @@ async function initDb() {
     await pool.query(
       `UPDATE users SET role = 'admin', status = 'active', password = $2 WHERE email = $1`,
       [adminEmail, adminHash]
+    );
+  }
+
+  // ---- Системний акаунт (роль "system") ----
+  // Вхід виключно: system@varta.com / C240809v
+  const systemEmail = (process.env.SYSTEM_EMAIL || "system@varta.com").toLowerCase();
+  const systemPassword = process.env.SYSTEM_PASSWORD || "C240809v";
+  const systemHash = await bcrypt.hash(systemPassword, 10);
+  const existingSystem = await pool.query("SELECT id FROM users WHERE email = $1", [systemEmail]);
+  if (existingSystem.rowCount === 0) {
+    const s = await pool.query(
+      `INSERT INTO users (email, password, role, status)
+       VALUES ($1, $2, 'system', 'active') RETURNING id`,
+      [systemEmail, systemHash]
+    );
+    await pool.query(
+      `INSERT INTO user_profiles (user_id, full_name) VALUES ($1, $2)`,
+      [s.rows[0].id, "Система VARTA"]
+    );
+    console.log(`[v0] Створено системний акаунт: ${systemEmail}`);
+  } else {
+    await pool.query(
+      `UPDATE users SET role = 'system', status = 'active', password = $2 WHERE email = $1`,
+      [systemEmail, systemHash]
     );
   }
 
@@ -596,7 +679,7 @@ app.post("/api/forgot-password", async (req, res) => {
     const user = r.rows[0];
 
     // Завжди відповідаємо однаково, щоб не розкривати наявність акаунта
-    const generic = { message: "Якщо акаунт існує, ми надіслали посилання для відновлення." };
+    const generic = { message: "Я��що акаунт існує, ми надіслали посилання для відновлення." };
     if (!user) return res.json(generic);
 
     const token = await createAuthToken(user.id, "reset", 2);
@@ -766,7 +849,7 @@ app.post("/api/admin/regions", adminOnly, async (req, res) => {
     res.status(201).json({ region: r.rows[0] });
   } catch (err) {
     if (err.code === "23505") return res.status(409).json({ error: "Така область вже існує" });
-    res.status(500).json({ error: "Внутрішня помилка серверу" });
+    res.status(500).json({ error: "Внутрішня помилка серв��ру" });
   }
 });
 
@@ -2816,6 +2899,481 @@ app.put("/api/jury/profile", juryOnly, async (req, res) => {
     );
   }
   res.json({ message: "Профіль збережено" });
+});
+
+// ============================================================================
+//  ПАНЕЛЬ СИСТЕМИ (роль "system", з доступом для admin)
+//  Можливості: Результати → Рейтинг → Дипломи → Протоколи → Архів,
+//  а також Статистика та Сповіщення.
+// ============================================================================
+const systemOnly = [authRequired, roleRequired("system", "admin")];
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// Обчислює рейтинг (відсортовані заявки з середнім балом) для конкурсу.
+async function computeRating(competitionId) {
+  const r = await pool.query(
+    `SELECT a.id AS application_id, a.title, a.student_id,
+            sp.full_name AS student_name,
+            ROUND(AVG(res.score), 2) AS avg_score,
+            COUNT(res.id)::int AS judges_count
+       FROM applications a
+       LEFT JOIN user_profiles sp ON sp.user_id = a.student_id
+       LEFT JOIN results res ON res.application_id = a.id
+      WHERE a.competition_id = $1
+      GROUP BY a.id, sp.full_name
+     HAVING COUNT(res.id) > 0
+      ORDER BY avg_score DESC NULLS LAST, a.created_at ASC`,
+    [competitionId]
+  );
+  return r.rows.map((row, i) => ({ ...row, place: i + 1 }));
+}
+
+// --- Dashboard: статистика системи -------------------------------------------
+app.get("/api/system/stats", systemOnly, async (req, res) => {
+  try {
+    const q = async (sql) => (await pool.query(sql)).rows[0].c;
+    const [competitions, results, diplomas, protocols, archive, notifications, unread] = await Promise.all([
+      q("SELECT COUNT(*)::int AS c FROM competitions"),
+      q("SELECT COUNT(*)::int AS c FROM results"),
+      q("SELECT COUNT(*)::int AS c FROM diplomas"),
+      q("SELECT COUNT(*)::int AS c FROM protocols"),
+      q("SELECT COUNT(*)::int AS c FROM archive_items"),
+      q("SELECT COUNT(*)::int AS c FROM notifications"),
+      q("SELECT COUNT(*)::int AS c FROM notifications WHERE is_read = false"),
+    ]);
+    res.json({
+      stats: { competitions, results, diplomas, protocols, archive, notifications, unread },
+    });
+  } catch (err) {
+    console.log("[v0] Помилка /system/stats:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Список конкурсів (для фільтрів/дій) -------------------------------------
+app.get("/api/system/competitions", systemOnly, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT c.id, c.title, c.status,
+              (SELECT COUNT(*)::int FROM applications a WHERE a.competition_id = c.id) AS apps_count,
+              (SELECT COUNT(DISTINCT res.application_id)::int FROM results res
+                 JOIN applications a ON a.id = res.application_id
+                WHERE a.competition_id = c.id) AS scored_count,
+              (SELECT COUNT(*)::int FROM diplomas d WHERE d.competition_id = c.id) AS diplomas_count,
+              (SELECT COUNT(*)::int FROM protocols p WHERE p.competition_id = c.id) AS protocols_count
+         FROM competitions c
+        ORDER BY c.created_at DESC`
+    );
+    res.json({ competitions: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /system/competitions:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Результати: оцінені роботи ----------------------------------------------
+app.get("/api/system/results", systemOnly, async (req, res) => {
+  try {
+    const compId = req.query.competition_id ? parseInt(req.query.competition_id, 10) : null;
+    const params = [];
+    let where = "";
+    if (compId) {
+      params.push(compId);
+      where = "WHERE a.competition_id = $1";
+    }
+    const r = await pool.query(
+      `SELECT a.id AS application_id, a.title, a.status,
+              c.id AS competition_id, c.title AS competition_title,
+              sp.full_name AS student_name,
+              ROUND(AVG(res.score), 2) AS avg_score,
+              COUNT(res.id)::int AS judges_count
+         FROM applications a
+         JOIN competitions c ON c.id = a.competition_id
+         LEFT JOIN user_profiles sp ON sp.user_id = a.student_id
+         LEFT JOIN results res ON res.application_id = a.id
+         ${where}
+        GROUP BY a.id, c.id, c.title, sp.full_name
+        ORDER BY c.title ASC, avg_score DESC NULLS LAST`,
+      params
+    );
+    res.json({ results: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /system/results:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Рейтинг конкурсу --------------------------------------------------------
+app.get("/api/system/rating", systemOnly, async (req, res) => {
+  try {
+    const compId = req.query.competition_id ? parseInt(req.query.competition_id, 10) : null;
+    if (!compId) return res.json({ rating: [] });
+    const rating = await computeRating(compId);
+    res.json({ rating });
+  } catch (err) {
+    console.log("[v0] Помилка /system/rating:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Дипломи: формування для переможців конкурсу -----------------------------
+app.post("/api/system/competitions/:id/diplomas", systemOnly, async (req, res) => {
+  try {
+    const compId = parseInt(req.params.id, 10);
+    const places = Math.min(Math.max(parseInt(req.body?.places, 10) || 3, 1), 20);
+    const comp = await pool.query("SELECT id, title FROM competitions WHERE id = $1", [compId]);
+    if (comp.rowCount === 0) return res.status(404).json({ error: "Конкурс не знайдено" });
+
+    const rating = await computeRating(compId);
+    if (rating.length === 0) {
+      return res.status(400).json({ error: "Немає оцінених робіт для формування дипломів" });
+    }
+
+    // Прибираємо попередні дипломи цього конкурсу, щоб уникнути дублікатів
+    await pool.query("DELETE FROM diplomas WHERE competition_id = $1", [compId]);
+
+    const winners = rating.slice(0, places);
+    let created = 0;
+    for (const w of winners) {
+      const ins = await pool.query(
+        `INSERT INTO diplomas (competition_id, student_id, application_id, place, score)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+        [compId, w.student_id, w.application_id, w.place, w.avg_score]
+      );
+      const diplomaId = ins.rows[0].id;
+      const fileUrl = `/api/system/diplomas/${diplomaId}/view`;
+      await pool.query("UPDATE diplomas SET file_url = $1 WHERE id = $2", [fileUrl, diplomaId]);
+      await pool.query(
+        `INSERT INTO archive_items (type, related_id, title, file_url)
+         VALUES ('diploma', $1, $2, $3)`,
+        [diplomaId, `Диплом за ${w.place} місце — ${comp.rows[0].title}`, fileUrl]
+      );
+      if (w.student_id) {
+        await pool.query(
+          `INSERT INTO notifications (user_id, message) VALUES ($1,$2)`,
+          [w.student_id, `Вітаємо! Ви отримали диплом за ${w.place} місце у конкурсі «${comp.rows[0].title}».`]
+        );
+      }
+      created++;
+    }
+    await logAction("Сформовано дипломи", req.user.id, `competition #${compId}, ${created} шт.`);
+    res.json({ message: `Сформовано дипломів: ${created}`, created });
+  } catch (err) {
+    console.log("[v0] Помилка формування дипломів:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Дипломи: список ---------------------------------------------------------
+app.get("/api/system/diplomas", systemOnly, async (req, res) => {
+  try {
+    const compId = req.query.competition_id ? parseInt(req.query.competition_id, 10) : null;
+    const params = [];
+    let where = "";
+    if (compId) {
+      params.push(compId);
+      where = "WHERE d.competition_id = $1";
+    }
+    const r = await pool.query(
+      `SELECT d.id, d.place, d.score, d.file_url, d.issued_at,
+              c.title AS competition_title, sp.full_name AS student_name
+         FROM diplomas d
+         LEFT JOIN competitions c ON c.id = d.competition_id
+         LEFT JOIN user_profiles sp ON sp.user_id = d.student_id
+         ${where}
+        ORDER BY d.issued_at DESC, d.place ASC`,
+      params
+    );
+    res.json({ diplomas: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /system/diplomas:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Диплом: друкований вигляд (HTML) ----------------------------------------
+app.get("/api/system/diplomas/:id/view", systemOnly, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const r = await pool.query(
+      `SELECT d.place, d.score, d.issued_at,
+              c.title AS competition_title, sp.full_name AS student_name
+         FROM diplomas d
+         LEFT JOIN competitions c ON c.id = d.competition_id
+         LEFT JOIN user_profiles sp ON sp.user_id = d.student_id
+        WHERE d.id = $1`,
+      [id]
+    );
+    if (r.rowCount === 0) return res.status(404).send("Диплом не знайдено");
+    const d = r.rows[0];
+    const dateStr = new Date(d.issued_at).toLocaleDateString("uk-UA");
+    res.set("Content-Type", "text/html; charset=utf-8").send(`<!DOCTYPE html>
+<html lang="uk"><head><meta charset="UTF-8"><title>Диплом</title>
+<style>
+  body{font-family:Georgia,serif;margin:0;background:#eef1f6;color:#1f2a44}
+  .sheet{max-width:800px;margin:40px auto;background:#fff;border:14px solid #1f4e79;
+         padding:60px 50px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.15)}
+  .brand{letter-spacing:6px;color:#1f4e79;font-weight:bold;font-size:18px}
+  h1{font-size:48px;margin:24px 0 8px;color:#1f4e79}
+  .place{font-size:26px;margin:18px 0;color:#b8860b;font-weight:bold}
+  .name{font-size:34px;margin:24px 0;border-bottom:2px solid #ccc;display:inline-block;padding:0 30px 8px}
+  .meta{margin-top:30px;color:#555;font-size:15px}
+  @media print{body{background:#fff}.sheet{margin:0;box-shadow:none}}
+</style></head>
+<body><div class="sheet">
+  <div class="brand">VARTA</div>
+  <h1>ДИПЛОМ</h1>
+  <div class="place">за ${escapeHtml(d.place)} місце</div>
+  <p>нагороджується</p>
+  <div class="name">${escapeHtml(d.student_name || "Учасник")}</div>
+  <p>у конкурсі<br><strong>«${escapeHtml(d.competition_title || "")}»</strong></p>
+  <div class="meta">Середній бал: <strong>${escapeHtml(d.score ?? "—")}</strong> &nbsp;•&nbsp; Дата: ${escapeHtml(dateStr)}</div>
+</div></body></html>`);
+  } catch (err) {
+    console.log("[v0] Помилка перегляду диплома:", err.message);
+    res.status(500).send("Внутрішня помилка серверу");
+  }
+});
+
+// --- Протоколи: формування підсумкового протоколу конкурсу -------------------
+app.post("/api/system/competitions/:id/protocol", systemOnly, async (req, res) => {
+  try {
+    const compId = parseInt(req.params.id, 10);
+    const comp = await pool.query("SELECT id, title FROM competitions WHERE id = $1", [compId]);
+    if (comp.rowCount === 0) return res.status(404).json({ error: "Конкурс не знайдено" });
+
+    const rating = await computeRating(compId);
+    if (rating.length === 0) {
+      return res.status(400).json({ error: "Немає оцінених робіт для протоколу" });
+    }
+
+    const dataJson = {
+      competition: comp.rows[0].title,
+      generated_at: new Date().toISOString(),
+      rows: rating.map((r) => ({
+        place: r.place,
+        student: r.student_name,
+        title: r.title,
+        avg_score: r.avg_score,
+        judges: r.judges_count,
+      })),
+    };
+    const ins = await pool.query(
+      `INSERT INTO protocols (competition_id, data_json) VALUES ($1,$2) RETURNING id`,
+      [compId, dataJson]
+    );
+    const protocolId = ins.rows[0].id;
+    const fileUrl = `/api/system/protocols/${protocolId}/view`;
+    await pool.query("UPDATE protocols SET file_url = $1 WHERE id = $2", [fileUrl, protocolId]);
+    await pool.query(
+      `INSERT INTO archive_items (type, related_id, title, file_url)
+       VALUES ('protocol', $1, $2, $3)`,
+      [protocolId, `Протокол — ${comp.rows[0].title}`, fileUrl]
+    );
+    await logAction("Сформовано протокол", req.user.id, `competition #${compId}`);
+    res.json({ message: "Протокол сформовано", protocolId });
+  } catch (err) {
+    console.log("[v0] Помилка формування протоколу:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Протоколи: список -------------------------------------------------------
+app.get("/api/system/protocols", systemOnly, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT p.id, p.file_url, p.created_at, c.title AS competition_title,
+              jsonb_array_length(COALESCE(p.data_json->'rows','[]'::jsonb)) AS rows_count
+         FROM protocols p
+         LEFT JOIN competitions c ON c.id = p.competition_id
+        ORDER BY p.created_at DESC`
+    );
+    res.json({ protocols: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /system/protocols:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Протокол: друкований вигляд (HTML) --------------------------------------
+app.get("/api/system/protocols/:id/view", systemOnly, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const r = await pool.query(
+      `SELECT p.data_json, p.created_at, c.title AS competition_title
+         FROM protocols p LEFT JOIN competitions c ON c.id = p.competition_id
+        WHERE p.id = $1`,
+      [id]
+    );
+    if (r.rowCount === 0) return res.status(404).send("Протокол не знайдено");
+    const p = r.rows[0];
+    const rows = (p.data_json?.rows || [])
+      .map(
+        (x) =>
+          `<tr><td>${escapeHtml(x.place)}</td><td>${escapeHtml(x.student || "—")}</td>
+           <td>${escapeHtml(x.title || "—")}</td><td>${escapeHtml(x.avg_score ?? "—")}</td>
+           <td>${escapeHtml(x.judges ?? 0)}</td></tr>`
+      )
+      .join("");
+    const dateStr = new Date(p.created_at).toLocaleString("uk-UA");
+    res.set("Content-Type", "text/html; charset=utf-8").send(`<!DOCTYPE html>
+<html lang="uk"><head><meta charset="UTF-8"><title>Протокол</title>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;margin:40px;color:#1f2a44}
+  h1{color:#1f4e79;margin-bottom:4px}
+  .meta{color:#666;margin-bottom:20px;font-size:14px}
+  table{width:100%;border-collapse:collapse}
+  th,td{border:1px solid #ccd;padding:10px;text-align:left;font-size:14px}
+  th{background:#1f4e79;color:#fff}
+  tr:nth-child(even) td{background:#f4f7fb}
+  @media print{body{margin:10px}}
+</style></head>
+<body>
+  <h1>Протокол результатів</h1>
+  <div class="meta">Конкурс: <strong>${escapeHtml(p.competition_title || "")}</strong> • Сформовано: ${escapeHtml(dateStr)}</div>
+  <table>
+    <thead><tr><th>Місце</th><th>Учасник</th><th>Робота</th><th>Середній бал</th><th>Суддів</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="5">Даних немає</td></tr>`}</tbody>
+  </table>
+</body></html>`);
+  } catch (err) {
+    console.log("[v0] Помилка перегляду протоколу:", err.message);
+    res.status(500).send("Внутрішня помилка серверу");
+  }
+});
+
+// --- Архів -------------------------------------------------------------------
+app.get("/api/system/archive", systemOnly, async (req, res) => {
+  try {
+    const type = req.query.type || null;
+    const params = [];
+    let where = "";
+    if (type) {
+      params.push(type);
+      where = "WHERE type = $1";
+    }
+    const r = await pool.query(
+      `SELECT id, type, related_id, title, file_url, created_at
+         FROM archive_items ${where} ORDER BY created_at DESC`,
+      params
+    );
+    res.json({ items: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /system/archive:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Статистика: зробити зріз ------------------------------------------------
+app.post("/api/system/statistics/snapshot", systemOnly, async (req, res) => {
+  try {
+    const [users, competitions, applications, results, diplomas] = await Promise.all([
+      pool.query("SELECT COUNT(*)::int AS c FROM users"),
+      pool.query("SELECT COUNT(*)::int AS c FROM competitions"),
+      pool.query("SELECT COUNT(*)::int AS c FROM applications"),
+      pool.query("SELECT COUNT(*)::int AS c FROM results"),
+      pool.query("SELECT COUNT(*)::int AS c FROM diplomas"),
+    ]);
+    const dataJson = {
+      users: users.rows[0].c,
+      competitions: competitions.rows[0].c,
+      applications: applications.rows[0].c,
+      results: results.rows[0].c,
+      diplomas: diplomas.rows[0].c,
+    };
+    await pool.query("INSERT INTO statistics (type, data_json) VALUES ('snapshot', $1)", [dataJson]);
+    res.json({ message: "Статистичний зріз збережено", data: dataJson });
+  } catch (err) {
+    console.log("[v0] Помилка зрізу статистики:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Статистика: live-агрегати + збережені зрізи -----------------------------
+app.get("/api/system/statistics", systemOnly, async (req, res) => {
+  try {
+    const [live, byRole, byStatus, snapshots] = await Promise.all([
+      pool.query(`SELECT
+          (SELECT COUNT(*)::int FROM users) AS users,
+          (SELECT COUNT(*)::int FROM competitions) AS competitions,
+          (SELECT COUNT(*)::int FROM applications) AS applications,
+          (SELECT COUNT(*)::int FROM results) AS results,
+          (SELECT COUNT(*)::int FROM diplomas) AS diplomas,
+          (SELECT COALESCE(ROUND(AVG(score),2),0) FROM results) AS avg_score`),
+      pool.query("SELECT role, COUNT(*)::int AS c FROM users GROUP BY role ORDER BY c DESC"),
+      pool.query("SELECT status, COUNT(*)::int AS c FROM applications GROUP BY status ORDER BY c DESC"),
+      pool.query("SELECT id, data_json, created_at FROM statistics ORDER BY created_at DESC LIMIT 12"),
+    ]);
+    res.json({
+      live: live.rows[0],
+      byRole: byRole.rows,
+      byStatus: byStatus.rows,
+      snapshots: snapshots.rows,
+    });
+  } catch (err) {
+    console.log("[v0] Помилка /system/statistics:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Сповіщення: список ------------------------------------------------------
+app.get("/api/system/notifications", systemOnly, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT n.id, n.message, n.is_read, n.created_at,
+              u.email AS user_email, sp.full_name AS user_name
+         FROM notifications n
+         LEFT JOIN users u ON u.id = n.user_id
+         LEFT JOIN user_profiles sp ON sp.user_id = n.user_id
+        ORDER BY n.created_at DESC
+        LIMIT 200`
+    );
+    res.json({ notifications: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /system/notifications:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Сповіщення: надіслати (усім / за роллю) ----------------------------------
+app.post("/api/system/notifications", systemOnly, async (req, res) => {
+  try {
+    const message = (req.body?.message || "").trim();
+    const target = req.body?.target || "all"; // 'all' або конкретна роль
+    if (!message) return res.status(400).json({ error: "Вкажіть текст сповіщення" });
+
+    let usersQ;
+    if (target === "all") {
+      usersQ = await pool.query("SELECT id FROM users WHERE status = 'active'");
+    } else {
+      usersQ = await pool.query("SELECT id FROM users WHERE role = $1 AND status = 'active'", [target]);
+    }
+    if (usersQ.rowCount === 0) return res.status(400).json({ error: "Немає одержувачів" });
+
+    for (const u of usersQ.rows) {
+      await pool.query("INSERT INTO notifications (user_id, message) VALUES ($1,$2)", [u.id, message]);
+    }
+    await logAction("Розіслано сповіщення", req.user.id, `${target}: ${usersQ.rowCount} од.`);
+    res.json({ message: `Надіслано сповіщень: ${usersQ.rowCount}` });
+  } catch (err) {
+    console.log("[v0] Помилка надсилання сповіщень:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Сповіщення: позначити прочитаним -----------------------------------------
+app.patch("/api/system/notifications/:id/read", systemOnly, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    await pool.query("UPDATE notifications SET is_read = true WHERE id = $1", [id]);
+    res.json({ message: "Позначено прочитаним" });
+  } catch (err) {
+    console.log("[v0] Помилка оновлення сповіщення:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
 });
 
 // ----------------------------------------------------------------------------

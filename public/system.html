@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="uk" class="bg-admin">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VARTA — Система</title>
+    <link rel="stylesheet" href="./admin.css" />
+    <link rel="stylesheet" href="./methodist.css" />
+</head>
+
+<body>
+    <div class="admin-shell">
+        <!-- Бічна навігація -->
+        <aside class="sidebar">
+            <div class="logo">
+                <span class="logo-mark">V</span>
+                <div>
+                    <strong>VARTA</strong>
+                    <small>Система</small>
+                </div>
+            </div>
+            <nav class="nav">
+                <button class="nav-item active" data-page="dashboard">Dashboard</button>
+                <button class="nav-item" data-page="results">Результати</button>
+                <button class="nav-item" data-page="rating">Рейтинг</button>
+                <button class="nav-item" data-page="archive">Архів</button>
+                <button class="nav-item" data-page="statistics">Статистика</button>
+                <button class="nav-item" data-page="notifications">Сповіщення</button>
+            </nav>
+            <button id="logoutBtn" class="logout">Вийти</button>
+        </aside>
+
+        <!-- Основна область -->
+        <main class="content">
+            <header class="topbar">
+                <h1 id="pageTitle">Dashboard</h1>
+                <div class="who"><span id="systemEmail">—</span><span class="role-pill">Система</span></div>
+            </header>
+
+            <div id="toast" class="toast"></div>
+
+            <!-- Dashboard -->
+            <section class="page" data-page="dashboard">
+                <div class="cards" id="statCards"></div>
+                <div class="panel">
+                    <h2>Робочий процес</h2>
+                    <div class="flow">
+                        <span class="flow-step">Результати</span>
+                        <span class="flow-arrow">→</span>
+                        <span class="flow-step">Рейтинг</span>
+                        <span class="flow-arrow">→</span>
+                        <span class="flow-step">Дипломи</span>
+                        <span class="flow-arrow">→</span>
+                        <span class="flow-step">Протоколи</span>
+                        <span class="flow-arrow">→</span>
+                        <span class="flow-step">Архів</span>
+                    </div>
+                    <p class="hint">Оберіть конкурс на сторінці «Рейтинг», щоб сформувати дипломи та протокол.</p>
+                </div>
+            </section>
+
+            <!-- Результати -->
+            <section class="page hidden" data-page="results">
+                <div class="panel">
+                    <h2>Результати оцінювання</h2>
+                    <div class="inline-form">
+                        <select id="resultsComp"></select>
+                    </div>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Конкурс</th>
+                                <th>Робота</th>
+                                <th>Учасник</th>
+                                <th>Середній бал</th>
+                                <th>Суддів</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultsBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Рейтинг -->
+            <section class="page hidden" data-page="rating">
+                <div class="panel">
+                    <h2>Рейтинг конкурсу</h2>
+                    <div class="inline-form">
+                        <select id="ratingComp"></select>
+                        <input type="number" id="diplomaPlaces" min="1" max="20" value="3" title="Кількість призових місць" />
+                        <button class="btn" id="genDiplomasBtn">Сформувати дипломи</button>
+                        <button class="btn ghost" id="genProtocolBtn">Сформувати протокол</button>
+                    </div>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Місце</th>
+                                <th>Учасник</th>
+                                <th>Робота</th>
+                                <th>Середній бал</th>
+                                <th>Суддів</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ratingBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Архів -->
+            <section class="page hidden" data-page="archive">
+                <div class="panel">
+                    <h2>Архів матеріалів</h2>
+                    <div class="inline-form">
+                        <select id="archiveType">
+                            <option value="">Усі типи</option>
+                            <option value="diploma">Дипломи</option>
+                            <option value="protocol">Протоколи</option>
+                        </select>
+                    </div>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Тип</th>
+                                <th>Назва</th>
+                                <th>Створено</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="archiveBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Статистика -->
+            <section class="page hidden" data-page="statistics">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Поточна статистика</h2>
+                        <button class="btn sm" id="snapshotBtn">Зробити зріз</button>
+                    </div>
+                    <div class="cards" id="liveStatCards"></div>
+                </div>
+                <div class="panel">
+                    <h2>Користувачі за ролями</h2>
+                    <div id="statRoleBreakdown" class="role-bars"></div>
+                </div>
+                <div class="panel">
+                    <h2>Заявки за статусом</h2>
+                    <div id="statStatusBreakdown" class="role-bars"></div>
+                </div>
+                <div class="panel">
+                    <h2>Збережені зрізи</h2>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Дата</th>
+                                <th>Користувачів</th>
+                                <th>Конкурсів</th>
+                                <th>Заявок</th>
+                                <th>Оцінок</th>
+                                <th>Дипломів</th>
+                            </tr>
+                        </thead>
+                        <tbody id="snapshotsBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Сповіщення -->
+            <section class="page hidden" data-page="notifications">
+                <div class="panel">
+                    <h2>Надіслати сповіщення</h2>
+                    <form id="notifyForm" class="stack-form">
+                        <label>Одержувачі
+                            <select id="notifyTarget">
+                                <option value="all">Усі користувачі</option>
+                                <option value="student">Учні</option>
+                                <option value="teacher">Вчителі</option>
+                                <option value="methodist">Методисти</option>
+                                <option value="zavuch">Завучі</option>
+                                <option value="jury">Журі</option>
+                            </select>
+                        </label>
+                        <label>Повідомлення
+                            <textarea id="notifyMessage" rows="3" placeholder="Текст сповіщення" required></textarea>
+                        </label>
+                        <button class="btn">Надіслати</button>
+                    </form>
+                </div>
+                <div class="panel">
+                    <h2>Надіслані сповіщення</h2>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Одержувач</th>
+                                <th>Повідомлення</th>
+                                <th>Статус</th>
+                                <th>Дата</th>
+                            </tr>
+                        </thead>
+                        <tbody id="notificationsBody"></tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="./system.js"></script>
+</body>
+
+</html>

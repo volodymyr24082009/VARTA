@@ -123,7 +123,7 @@ forms.forgot.addEventListener("submit", async (e) => {
 // Домашня сторінка для кожної ролі (куди перекидати одразу після входу)
 const ROLE_HOME = {
     admin: "/admin.html",
-    system: "/admin.html",
+    system: "/system.html",
     methodist: "/methodist.html",
     zavuch: "/zavuch.html",
     teacher: "/teacher.html",
