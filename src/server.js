@@ -7,12 +7,14 @@
 import "dotenv/config";
 import path from "node:path";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
 import cookieParser from "cookie-parser";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import multer from "multer";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -191,6 +193,18 @@ async function initDb() {
     );
   `);
 
+  // Файли, прикріплені до положення конкурсу
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS competition_rule_files (
+      id             SERIAL PRIMARY KEY,
+      competition_id INTEGER NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
+      file_url       VARCHAR(512) NOT NULL,
+      file_name      VARCHAR(255),
+      file_type      VARCHAR(128),
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
   // Призначене журі
   await pool.query(`
     CREATE TABLE IF NOT EXISTS competition_judges (
@@ -275,7 +289,7 @@ async function initDb() {
     );
   }
 
-  console.log("[v0] База даних готова: users, user_profiles, auth_tokens, regions, cities, schools, user_roles_requests, system_logs, system_settings, competitions, competition_sections, competition_forms, competition_rules, competition_judges, competition_templates, applications, application_files, results");
+  console.log("[v0] База даних готова: users, user_profiles, auth_tokens, regions, cities, schools, user_roles_requests, system_logs, system_settings, competitions, competition_sections, competition_forms, competition_rules, competition_rule_files, competition_judges, competition_templates, applications, application_files, results");
 }
 
 // Запис дії в журнал системи
@@ -332,6 +346,21 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, "..", "public")));
+
+// --- Завантаження файлів (положення, файли заявок) ---------------------------
+const UPLOAD_DIR = path.join(__dirname, "..", "public", "uploads");
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const uploadStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const safe = file.originalname.replace(/[^\w.\-]+/g, "_").slice(-80);
+    cb(null, `${Date.now()}_${crypto.randomBytes(4).toString("hex")}_${safe}`);
+  },
+});
+const upload = multer({
+  storage: uploadStorage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // до 10 МБ
+});
 
 // --- Мідлвер автентифікації (перевірка JWT із httpOnly cookie) ---------------
 function authRequired(req, res, next) {
@@ -999,10 +1028,11 @@ app.post("/api/methodist/competitions", methodistOnly, async (req, res) => {
 app.get("/api/methodist/competitions/:id", methodistOnly, async (req, res) => {
   const competition = await ownedCompetition(req, res);
   if (!competition) return;
-  const [sections, form, rules, judges] = await Promise.all([
+  const [sections, form, rules, ruleFiles, judges] = await Promise.all([
     pool.query("SELECT * FROM competition_sections WHERE competition_id = $1 ORDER BY id", [competition.id]),
     pool.query("SELECT * FROM competition_forms WHERE competition_id = $1", [competition.id]),
     pool.query("SELECT * FROM competition_rules WHERE competition_id = $1", [competition.id]),
+    pool.query("SELECT * FROM competition_rule_files WHERE competition_id = $1 ORDER BY id", [competition.id]),
     pool.query(
       `SELECT cj.*, u.email, pr.full_name
          FROM competition_judges cj
@@ -1017,6 +1047,7 @@ app.get("/api/methodist/competitions/:id", methodistOnly, async (req, res) => {
     sections: sections.rows,
     form: form.rows[0] || { fields_json: [] },
     rules: rules.rows[0] || { content: "", file_url: "" },
+    ruleFiles: ruleFiles.rows,
     judges: judges.rows,
   });
 });
@@ -1136,6 +1167,64 @@ app.put("/api/methodist/competitions/:id/rules", methodistOnly, async (req, res)
     [competition.id, content, file_url]
   );
   res.json({ rules: r.rows[0] });
+});
+
+// Завантаження файлу до положення конкурсу
+app.post(
+  "/api/methodist/competitions/:id/rules/files",
+  authRequired,
+  roleRequired("methodist", "admin", "system"),
+  upload.single("file"),
+  async (req, res) => {
+    const competition = await ownedCompetition(req, res);
+    if (!competition) {
+      // Видаляємо завантажений файл, якщо доступ заборонено
+      if (req.file) fs.unlink(req.file.path, () => {});
+      return;
+    }
+    if (!req.file) return res.status(400).json({ error: "Файл не надіслано" });
+    const fileUrl = `/uploads/${req.file.filename}`;
+    const r = await pool.query(
+      `INSERT INTO competition_rule_files (competition_id, file_url, file_name, file_type)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [competition.id, fileUrl, req.file.originalname, req.file.mimetype]
+    );
+    // Гарантуємо наявність запису положення
+    await pool.query(
+      `INSERT INTO competition_rules (competition_id, content) VALUES ($1, '')
+       ON CONFLICT (competition_id) DO NOTHING`,
+      [competition.id]
+    );
+    await logAction("Додано файл до положення", req.user.id, `competition #${competition.id}: ${req.file.originalname}`);
+    res.status(201).json({ file: r.rows[0] });
+  }
+);
+
+// Видалення файлу положення
+app.delete("/api/methodist/rule-files/:id", methodistOnly, async (req, res) => {
+  const fid = parseInt(req.params.id, 10);
+  const f = await pool.query(
+    `SELECT rf.*, c.methodist_id FROM competition_rule_files rf
+       JOIN competitions c ON c.id = rf.competition_id WHERE rf.id = $1`,
+    [fid]
+  );
+  if (f.rowCount === 0) return res.status(404).json({ error: "Файл не знайдено" });
+  const privileged = req.user.role === "admin" || req.user.role === "system";
+  if (!privileged && f.rows[0].methodist_id !== req.user.id) return res.status(403).json({ error: "Недостатньо прав" });
+  // Видаляємо файл з диска (ігноруємо помилку, якщо файлу вже немає)
+  const diskPath = path.join(__dirname, "..", "public", f.rows[0].file_url.replace(/^\//, ""));
+  fs.unlink(diskPath, () => {});
+  await pool.query("DELETE FROM competition_rule_files WHERE id = $1", [fid]);
+  res.json({ message: "Файл видалено" });
+});
+
+// Multer-помилки (наприклад, перевищення розміру файлу)
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const msg = err.code === "LIMIT_FILE_SIZE" ? "Файл завеликий (макс. 10 МБ)" : "Помилка завантаження файлу";
+    return res.status(400).json({ error: msg });
+  }
+  next(err);
 });
 
 // ---------------------------------------------------------------------------

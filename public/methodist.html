@@ -333,6 +333,15 @@
                         </label>
                         <button class="btn ok">Зберегти положення</button>
                     </form>
+
+                    <h4 class="subhead">Прикріплені файли</h4>
+                    <form id="ruleFileForm" class="upload-form">
+                        <input type="file" id="ruleFileInput"
+                            accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.png,.jpg,.jpeg" required />
+                        <button class="btn" type="submit">Завантажити файл</button>
+                    </form>
+                    <p class="hint">Дозволені документи та зображення, до 10 МБ.</p>
+                    <ul id="ruleFilesList" class="item-list"></ul>
                 </div>
 
                 <!-- Журі -->

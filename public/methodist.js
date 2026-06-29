@@ -380,6 +380,7 @@ async function openModal(id, tab = "sections") {
   $("publishBtn").classList.toggle("hidden", st === "published");
   renderSections();
   renderFields();
+  renderRuleFiles();
   renderJudges();
   await loadJudgeOptions();
   switchTab(tab);
@@ -489,6 +490,50 @@ $("rulesForm").addEventListener("submit", async (e) => {
   if (!ok) return toast("err", data.error || "Помилка");
   current.rules = data.rules;
   toast("ok", "Положення збережено");
+});
+
+// ---- Файли положення (в модалі) ---------------------------------------------
+function renderRuleFiles() {
+  const files = current.ruleFiles || [];
+  $("ruleFilesList").innerHTML = files.length
+    ? files
+        .map(
+          (f) => `<li>
+            <span><a href="${esc(f.file_url)}" target="_blank" rel="noopener"><strong>${esc(f.file_name || f.file_url)}</strong></a>
+              <span class="meta"> ${fmtDate(f.created_at)}</span></span>
+            <button class="btn sm danger" data-del-rule-file="${f.id}">Видалити</button>
+          </li>`
+        )
+        .join("")
+    : `<div class="empty-list">Файлів ще немає</div>`;
+}
+$("ruleFileForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!current) return;
+  const input = $("ruleFileInput");
+  if (!input.files || !input.files[0]) return toast("err", "Оберіть файл");
+  const fd = new FormData();
+  fd.append("file", input.files[0]);
+  const res = await fetch(`/api/methodist/competitions/${current.competition.id}/rules/files`, {
+    method: "POST",
+    body: fd,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return toast("err", data.error || "Помилка завантаження");
+  current.ruleFiles = [...(current.ruleFiles || []), data.file];
+  $("ruleFileForm").reset();
+  renderRuleFiles();
+  toast("ok", "Файл завантажено");
+});
+$("ruleFilesList").addEventListener("click", async (e) => {
+  const id = e.target.getAttribute("data-del-rule-file");
+  if (!id) return;
+  if (!confirm("Видалити файл?")) return;
+  const { ok, data } = await send("DELETE", `/api/methodist/rule-files/${id}`);
+  if (!ok) return toast("err", data.error || "Помилка");
+  current.ruleFiles = (current.ruleFiles || []).filter((f) => String(f.id) !== id);
+  renderRuleFiles();
+  toast("ok", "Файл видалено");
 });
 
 // ---- Журі (в модалі) --------------------------------------------------------
