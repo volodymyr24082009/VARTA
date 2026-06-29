@@ -1261,7 +1261,7 @@ app.post(
        VALUES ($1, $2, $3, $4) RETURNING *`,
       [competition.id, fileUrl, req.file.originalname, req.file.mimetype]
     );
-    // Гарантуємо наявність запису положення
+    // Гарантуємо наявність ��апису положення
     await pool.query(
       `INSERT INTO competition_rules (competition_id, content) VALUES ($1, '')
        ON CONFLICT (competition_id) DO NOTHING`,
@@ -2481,6 +2481,328 @@ app.delete("/api/student/certificates/:id", studentOnly, async (req, res) => {
 //  ПРОФІЛЬ УЧНЯ
 // ---------------------------------------------------------------------------
 app.put("/api/student/profile", studentOnly, async (req, res) => {
+  const full_name = (req.body?.full_name || "").trim() || null;
+  const phone = (req.body?.phone || "").trim() || null;
+  const upd = await pool.query(
+    "UPDATE user_profiles SET full_name = $2, phone = $3 WHERE user_id = $1 RETURNING id",
+    [req.user.id, full_name, phone]
+  );
+  if (upd.rowCount === 0) {
+    await pool.query(
+      "INSERT INTO user_profiles (user_id, full_name, phone) VALUES ($1,$2,$3)",
+      [req.user.id, full_name, phone]
+    );
+  }
+  res.json({ message: "Профіль збережено" });
+});
+
+// ============================================================================
+//  ПАНЕЛЬ ЖУРІ (роль "jury", з доступом для admin/system)
+//  Можливості: перегляд призначених конкурсів і робіт,
+//  оцінювання (Роботи → Оцінювання → Бали → Коментарі), рейтинг, профіль.
+// ============================================================================
+const juryOnly = [authRequired, roleRequired("jury", "admin", "system")];
+
+// Повертає список id конкурсів, до яких призначено журі.
+// Для admin/system повертає null (без обмежень — усі конкурси).
+async function juryCompetitionIds(req) {
+  if (req.user.role === "admin" || req.user.role === "system") return null;
+  const r = await pool.query(
+    "SELECT competition_id FROM competition_judges WHERE user_id = $1",
+    [req.user.id]
+  );
+  return r.rows.map((x) => x.competition_id);
+}
+
+// Перевіряє, що журі має доступ до заявки (через призначення на конкурс).
+async function juryCanAccessApp(req, appId) {
+  if (req.user.role === "admin" || req.user.role === "system") return true;
+  const r = await pool.query(
+    `SELECT 1 FROM applications a
+       JOIN competition_judges cj ON cj.competition_id = a.competition_id
+      WHERE a.id = $1 AND cj.user_id = $2`,
+    [appId, req.user.id]
+  );
+  return r.rowCount > 0;
+}
+
+// --- Інформація про журі: до скількох конкурсів призначено -------------------
+app.get("/api/jury/me", juryOnly, async (req, res) => {
+  try {
+    const ids = await juryCompetitionIds(req);
+    const count = ids === null
+      ? (await pool.query("SELECT COUNT(*)::int AS c FROM competitions")).rows[0].c
+      : ids.length;
+    res.json({ assignedCount: count, role: req.user.role });
+  } catch (err) {
+    console.log("[v0] Помилка /jury/me:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Dashboard: статистика журі ----------------------------------------------
+app.get("/api/jury/stats", juryOnly, async (req, res) => {
+  try {
+    const ids = await juryCompetitionIds(req);
+    const compFilter = ids === null ? "" : "WHERE a.competition_id = ANY($2)";
+    const compParams = ids === null ? [req.user.id] : [req.user.id, ids];
+
+    const [competitions, works, scored, avg] = await Promise.all([
+      ids === null
+        ? pool.query("SELECT COUNT(*)::int AS c FROM competitions")
+        : pool.query("SELECT COUNT(*)::int AS c FROM competition_judges WHERE user_id = $1", [req.user.id]),
+      pool.query(`SELECT COUNT(*)::int AS c FROM applications a ${compFilter.replace("$2", "$1")}`, ids === null ? [] : [ids]),
+      pool.query(
+        `SELECT COUNT(*)::int AS c FROM results r
+          JOIN applications a ON a.id = r.application_id
+         WHERE r.judge_id = $1 ${ids === null ? "" : "AND a.competition_id = ANY($2)"}`,
+        compParams
+      ),
+      pool.query(
+        `SELECT COALESCE(ROUND(AVG(r.score), 2), 0) AS avg FROM results r
+          JOIN applications a ON a.id = r.application_id
+         WHERE r.judge_id = $1 ${ids === null ? "" : "AND a.competition_id = ANY($2)"}`,
+        compParams
+      ),
+    ]);
+
+    const worksCount = works.rows[0].c;
+    const scoredCount = scored.rows[0].c;
+    res.json({
+      stats: {
+        competitions: competitions.rows[0].c,
+        works: worksCount,
+        scored: scoredCount,
+        pending: Math.max(worksCount - scoredCount, 0),
+        avgScore: Number(avg.rows[0].avg),
+      },
+    });
+  } catch (err) {
+    console.log("[v0] Помилка статистики журі:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Призначені конкурси -----------------------------------------------------
+app.get("/api/jury/competitions", juryOnly, async (req, res) => {
+  try {
+    const ids = await juryCompetitionIds(req);
+    let sql;
+    let params;
+    if (ids === null) {
+      sql = `SELECT c.id, c.title, c.description, c.status, c.starts_at, c.ends_at,
+                    'judge' AS judge_role,
+                    (SELECT COUNT(*)::int FROM applications a WHERE a.competition_id = c.id) AS apps_count,
+                    (SELECT COUNT(*)::int FROM applications a
+                       JOIN results r ON r.application_id = a.id AND r.judge_id = $1
+                      WHERE a.competition_id = c.id) AS scored_count
+               FROM competitions c
+              ORDER BY c.created_at DESC`;
+      params = [req.user.id];
+    } else {
+      sql = `SELECT c.id, c.title, c.description, c.status, c.starts_at, c.ends_at,
+                    cj.role AS judge_role,
+                    (SELECT COUNT(*)::int FROM applications a WHERE a.competition_id = c.id) AS apps_count,
+                    (SELECT COUNT(*)::int FROM applications a
+                       JOIN results r ON r.application_id = a.id AND r.judge_id = $1
+                      WHERE a.competition_id = c.id) AS scored_count
+               FROM competition_judges cj
+               JOIN competitions c ON c.id = cj.competition_id
+              WHERE cj.user_id = $1
+              ORDER BY c.created_at DESC`;
+      params = [req.user.id];
+    }
+    const r = await pool.query(sql, params);
+    res.json({ competitions: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /jury/competitions:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Роботи (заявки) для оцінювання ------------------------------------------
+app.get("/api/jury/applications", juryOnly, async (req, res) => {
+  try {
+    const ids = await juryCompetitionIds(req);
+    const compId = req.query.competition_id ? parseInt(req.query.competition_id, 10) : null;
+
+    const where = [];
+    const params = [req.user.id];
+    if (ids !== null) {
+      params.push(ids);
+      where.push(`a.competition_id = ANY($${params.length})`);
+    }
+    if (compId) {
+      params.push(compId);
+      where.push(`a.competition_id = $${params.length}`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const r = await pool.query(
+      `SELECT a.id, a.title, a.status, a.created_at,
+              c.id AS competition_id, c.title AS competition_title,
+              sec.name AS section_name,
+              sp.full_name AS student_name,
+              (SELECT COUNT(*)::int FROM application_files f WHERE f.application_id = a.id) AS files_count,
+              r.id AS result_id, r.score AS my_score, r.comment AS my_comment
+         FROM applications a
+         JOIN competitions c ON c.id = a.competition_id
+         LEFT JOIN competition_sections sec ON sec.id = a.section_id
+         LEFT JOIN user_profiles sp ON sp.user_id = a.student_id
+         LEFT JOIN results r ON r.application_id = a.id AND r.judge_id = $1
+         ${whereSql}
+        ORDER BY a.created_at DESC`,
+      params
+    );
+    res.json({ applications: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /jury/applications:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Деталі однієї роботи: поля форми + файли + моя оцінка --------------------
+app.get("/api/jury/applications/:id", juryOnly, async (req, res) => {
+  try {
+    const aid = parseInt(req.params.id, 10);
+    if (!(await juryCanAccessApp(req, aid))) {
+      return res.status(403).json({ error: "Немає доступу до цієї роботи" });
+    }
+    const appR = await pool.query(
+      `SELECT a.id, a.title, a.status, a.created_at, a.data_json, a.competition_id,
+              c.title AS competition_title, sec.name AS section_name,
+              sp.full_name AS student_name
+         FROM applications a
+         JOIN competitions c ON c.id = a.competition_id
+         LEFT JOIN competition_sections sec ON sec.id = a.section_id
+         LEFT JOIN user_profiles sp ON sp.user_id = a.student_id
+        WHERE a.id = $1`,
+      [aid]
+    );
+    if (appR.rowCount === 0) return res.status(404).json({ error: "Роботу не знайдено" });
+    const application = appR.rows[0];
+
+    const [files, form, myResult] = await Promise.all([
+      pool.query("SELECT id, file_url, file_type FROM application_files WHERE application_id = $1 ORDER BY id", [aid]),
+      pool.query("SELECT fields_json FROM competition_forms WHERE competition_id = $1", [application.competition_id]),
+      pool.query("SELECT score, comment FROM results WHERE application_id = $1 AND judge_id = $2", [aid, req.user.id]),
+    ]);
+
+    res.json({
+      application,
+      files: files.rows,
+      fields: form.rows[0]?.fields_json || [],
+      myResult: myResult.rows[0] || null,
+    });
+  } catch (err) {
+    console.log("[v0] Помилка /jury/applications/:id:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Оцінювання: Бали (0–100) + Коментар (upsert по journ+роботі) ------------
+app.post("/api/jury/applications/:id/score", juryOnly, async (req, res) => {
+  try {
+    const aid = parseInt(req.params.id, 10);
+    if (!(await juryCanAccessApp(req, aid))) {
+      return res.status(403).json({ error: "Немає доступу до цієї роботи" });
+    }
+    const score = Number(req.body?.score);
+    const comment = (req.body?.comment || "").trim() || null;
+    if (!Number.isFinite(score) || score < 0 || score > 100) {
+      return res.status(400).json({ error: "Бал має бути числом від 0 до 100" });
+    }
+
+    const existing = await pool.query(
+      "SELECT id FROM results WHERE application_id = $1 AND judge_id = $2",
+      [aid, req.user.id]
+    );
+    if (existing.rowCount > 0) {
+      await pool.query(
+        "UPDATE results SET score = $1, comment = $2, created_at = now() WHERE id = $3",
+        [score, comment, existing.rows[0].id]
+      );
+    } else {
+      await pool.query(
+        "INSERT INTO results (application_id, judge_id, score, comment) VALUES ($1,$2,$3,$4)",
+        [aid, req.user.id, score, comment]
+      );
+    }
+    await logAction("Журі оцінило роботу", req.user.id, `application #${aid} → ${score}`);
+    res.json({ message: "Оцінку збережено" });
+  } catch (err) {
+    console.log("[v0] Помилка оцінювання журі:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Рейтинг робіт (середній бал по всіх журі) -------------------------------
+app.get("/api/jury/rating", juryOnly, async (req, res) => {
+  try {
+    const ids = await juryCompetitionIds(req);
+    const compId = req.query.competition_id ? parseInt(req.query.competition_id, 10) : null;
+
+    const where = [];
+    const params = [];
+    if (ids !== null) {
+      params.push(ids);
+      where.push(`a.competition_id = ANY($${params.length})`);
+    }
+    if (compId) {
+      params.push(compId);
+      where.push(`a.competition_id = $${params.length}`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const r = await pool.query(
+      `SELECT a.id, a.title, a.status,
+              c.title AS competition_title, sec.name AS section_name,
+              sp.full_name AS student_name,
+              ROUND(AVG(r.score), 2) AS avg_score,
+              COUNT(r.id)::int AS judges_count
+         FROM applications a
+         JOIN competitions c ON c.id = a.competition_id
+         LEFT JOIN competition_sections sec ON sec.id = a.section_id
+         LEFT JOIN user_profiles sp ON sp.user_id = a.student_id
+         LEFT JOIN results r ON r.application_id = a.id
+         ${whereSql}
+        GROUP BY a.id, c.title, sec.name, sp.full_name
+        ORDER BY avg_score DESC NULLS LAST, a.created_at DESC`,
+      params
+    );
+    res.json({ rating: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /jury/rating:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Мої коментарі (оцінки з коментарями, залишені цим журі) ------------------
+app.get("/api/jury/comments", juryOnly, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT r.id, r.score, r.comment, r.created_at,
+              a.id AS application_id, a.title AS application_title,
+              c.title AS competition_title, sec.name AS section_name,
+              sp.full_name AS student_name
+         FROM results r
+         JOIN applications a ON a.id = r.application_id
+         JOIN competitions c ON c.id = a.competition_id
+         LEFT JOIN competition_sections sec ON sec.id = a.section_id
+         LEFT JOIN user_profiles sp ON sp.user_id = a.student_id
+        WHERE r.judge_id = $1 AND r.comment IS NOT NULL AND r.comment <> ''
+        ORDER BY r.created_at DESC`,
+      [req.user.id]
+    );
+    res.json({ comments: r.rows });
+  } catch (err) {
+    console.log("[v0] Помилка /jury/comments:", err.message);
+    res.status(500).json({ error: "Внутрішня помилка серверу" });
+  }
+});
+
+// --- Профіль журі ------------------------------------------------------------
+app.put("/api/jury/profile", juryOnly, async (req, res) => {
   const full_name = (req.body?.full_name || "").trim() || null;
   const phone = (req.body?.phone || "").trim() || null;
   const upd = await pool.query(
