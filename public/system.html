@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="uk" class="bg-admin">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VARTA — Панель системи</title>
+    <link rel="stylesheet" href="./system.css" />
+</head>
+
+<body>
+    <div class="admin-shell">
+        <!-- Бічна навігація -->
+        <aside class="sidebar">
+            <div class="logo">
+                <span class="logo-mark">V</span>
+                <div>
+                    <strong>VARTA</strong>
+                    <small>Панель системи</small>
+                </div>
+            </div>
+            <nav class="nav">
+                <button class="nav-item active" data-page="dashboard">Dashboard</button>
+                <button class="nav-item" data-page="results">Результати</button>
+                <button class="nav-item" data-page="rating">Рейтинг</button>
+                <button class="nav-item" data-page="diplomas">Дипломи</button>
+                <button class="nav-item" data-page="protocols">Протоколи</button>
+                <button class="nav-item" data-page="archive">Архів</button>
+                <button class="nav-item" data-page="statistics">Статистика</button>
+                <button class="nav-item" data-page="notifications">Сповіщення</button>
+            </nav>
+            <button id="logoutBtn" class="logout">Вийти</button>
+        </aside>
+
+        <!-- Основна область -->
+        <main class="content">
+            <header class="topbar">
+                <h1 id="pageTitle">Dashboard</h1>
+                <div class="who"><span id="userEmail">—</span><span class="role-pill">Система</span></div>
+            </header>
+
+            <div id="toast" class="toast"></div>
+
+            <!-- Dashboard -->
+            <section class="page" data-page="dashboard">
+                <div class="cards" id="statCards"></div>
+                <div class="panel">
+                    <h2>Як працює конвеєр</h2>
+                    <p class="hint">Після завершення оцінювання система автоматично формує підсумкові документи.</p>
+                    <div class="flow">
+                        <div class="flow-step"><span class="flow-num">1</span>Результати</div>
+                        <div class="flow-arrow">→</div>
+                        <div class="flow-step"><span class="flow-num">2</span>Рейтинг</div>
+                        <div class="flow-arrow">→</div>
+                        <div class="flow-step"><span class="flow-num">3</span>Дипломи</div>
+                        <div class="flow-arrow">→</div>
+                        <div class="flow-step"><span class="flow-num">4</span>Протоколи</div>
+                        <div class="flow-arrow">→</div>
+                        <div class="flow-step"><span class="flow-num">5</span>Архів</div>
+                    </div>
+                </div>
+                <div class="panel">
+                    <h2>Обробка конкурсів</h2>
+                    <p class="hint">Запустіть конвеєр, щоб підрахувати рейтинг та згенерувати дипломи, протокол і архів.</p>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Конкурс</th>
+                                <th>Статус</th>
+                                <th>Заявок</th>
+                                <th>Оцінок</th>
+                                <th>Дипломів</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="processBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Результати -->
+            <section class="page hidden" data-page="results">
+                <div class="panel">
+                    <h2>Результати оцінювання</h2>
+                    <p class="hint">Оцінки, виставлені суддями по всіх заявках.</p>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Конкурс</th>
+                                <th>Заявка</th>
+                                <th>Учень</th>
+                                <th>Суддя</th>
+                                <th>Бал</th>
+                                <th>Коментар</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultsBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Рейтинг -->
+            <section class="page hidden" data-page="rating">
+                <div class="panel">
+                    <h2>Рейтинг учасників</h2>
+                    <p class="hint">Середній бал по заявці та місце в межах конкурсу.</p>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Місце</th>
+                                <th>Конкурс</th>
+                                <th>Учень</th>
+                                <th>Заявка</th>
+                                <th>Суддів</th>
+                                <th>Середній бал</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ratingBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Дипломи -->
+            <section class="page hidden" data-page="diplomas">
+                <div class="panel">
+                    <h2>Видані дипломи</h2>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Місце</th>
+                                <th>Учень</th>
+                                <th>Конкурс</th>
+                                <th>Бал</th>
+                                <th>Видано</th>
+                            </tr>
+                        </thead>
+                        <tbody id="diplomasBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Протоколи -->
+            <section class="page hidden" data-page="protocols">
+                <div class="panel">
+                    <h2>Протоколи конкурсів</h2>
+                    <div id="protocolsList" class="doc-list"></div>
+                </div>
+            </section>
+
+            <!-- Архів -->
+            <section class="page hidden" data-page="archive">
+                <div class="panel">
+                    <h2>Архів</h2>
+                    <p class="hint">Збережені конкурси, протоколи та дипломи.</p>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Тип</th>
+                                <th>Назва</th>
+                                <th>Додано</th>
+                            </tr>
+                        </thead>
+                        <tbody id="archiveBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Статистика -->
+            <section class="page hidden" data-page="statistics">
+                <div class="panel">
+                    <h2>Статистика</h2>
+                    <p class="hint">Агреговані підсумки оброблених конкурсів.</p>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Конкурс</th>
+                                <th>Учасників</th>
+                                <th>Дипломів</th>
+                                <th>Середній бал</th>
+                                <th>Найвищий бал</th>
+                                <th>Сформовано</th>
+                            </tr>
+                        </thead>
+                        <tbody id="statisticsBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Сповіщення -->
+            <section class="page hidden" data-page="notifications">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Сповіщення</h2>
+                        <button id="readAllBtn" class="btn sm ghost">Прочитати всі</button>
+                    </div>
+                    <ul id="notificationsList" class="item-list"></ul>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="./system.js"></script>
+</body>
+
+</html>

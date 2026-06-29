@@ -1,0 +1,132 @@
+/* Панель системи VARTA — спільний дизайн із методистом + додаткові стилі */
+@import url("./methodist.css");
+
+/* Заголовок панелі зі дією */
+.panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.panel-head h2 {
+    margin: 0;
+}
+
+/* Бейдж місця в рейтингу */
+.place {
+    width: 26px;
+    height: 26px;
+    display: inline-grid;
+    place-items: center;
+    border-radius: 50%;
+    background: #eef2f8;
+    color: var(--muted);
+    font-weight: 800;
+    font-size: 13px;
+}
+
+.place.gold {
+    background: #fde68a;
+    color: #92400e;
+}
+
+.place.silver {
+    background: #e2e8f0;
+    color: #475569;
+}
+
+.place.bronze {
+    background: #fcd9b6;
+    color: #9a3412;
+}
+
+.score {
+    font-weight: 800;
+    color: var(--primary);
+}
+
+/* Список документів (протоколи) */
+.doc-list {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.doc-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: #f7f9fc;
+    overflow: hidden;
+}
+
+.doc-card .doc-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 16px;
+    font-weight: 700;
+    font-size: 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+.doc-card .doc-title .meta {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.doc-card pre {
+    margin: 0;
+    padding: 14px 16px;
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--ink);
+    line-height: 1.6;
+}
+
+/* Сповіщення — індикатор непрочитаного */
+.item-list li.unread {
+    border-color: #c7dafd;
+    background: #f1f6ff;
+}
+
+.item-list li .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--primary);
+    flex: none;
+}
+
+.note-main {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.note-text {
+    min-width: 0;
+}
+
+.note-text .meta {
+    display: block;
+    margin-top: 2px;
+}
+
+/* Типи архіву */
+.type-tag {
+    background: #e7eefc;
+    color: var(--primary);
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+}
