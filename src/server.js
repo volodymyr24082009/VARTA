@@ -2285,13 +2285,37 @@ app.get("/api/student/competitions/:id/sections", studentOnly, async (req, res) 
   res.json({ sections: r.rows });
 });
 
+// --- Форма подання конкурсу (поля, які створив методист) ----------------------
+app.get("/api/student/competitions/:id/form", studentOnly, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const r = await pool.query(
+    "SELECT fields_json FROM competition_forms WHERE competition_id = $1",
+    [id]
+  );
+  const fields = r.rowCount > 0 && Array.isArray(r.rows[0].fields_json) ? r.rows[0].fields_json : [];
+  res.json({ fields });
+});
+
 // --- Подати власну заявку -----------------------------------------------------
-app.post("/api/student/applications", studentOnly, async (req, res) => {
+//  upload.any() дозволяє приймати як звичайний JSON, так і multipart/form-data
+//  (коли у формі конкурсу є поля типу "файл").
+app.post("/api/student/applications", studentOnly, upload.any(), async (req, res) => {
   try {
     const competitionId = parseInt(req.body?.competition_id, 10);
     const sectionId = req.body?.section_id ? parseInt(req.body.section_id, 10) : null;
     const title = (req.body?.title || "").trim() || null;
     if (!competitionId) return res.status(400).json({ error: "Оберіть конкурс" });
+
+    // Відповіді на поля форми конкурсу
+    let dataJson = {};
+    if (req.body?.data_json) {
+      try {
+        const parsed = JSON.parse(req.body.data_json);
+        if (parsed && typeof parsed === "object") dataJson = parsed;
+      } catch {
+        dataJson = {};
+      }
+    }
 
     const comp = await pool.query("SELECT id, status, title FROM competitions WHERE id = $1", [competitionId]);
     if (comp.rowCount === 0) return res.status(404).json({ error: "Конкурс не знайдено" });
@@ -2305,13 +2329,49 @@ app.post("/api/student/applications", studentOnly, async (req, res) => {
     if (dup.rowCount > 0) {
       return res.status(409).json({ error: "Ви вже подали заявку на цей конкурс" });
     }
-    const ins = await pool.query(
-      `INSERT INTO applications (competition_id, student_id, section_id, title, status)
-       VALUES ($1,$2,$3,$4,'submitted') RETURNING id`,
-      [competitionId, req.user.id, sectionId, title]
+
+    // Перевірка обов'язкових полів форми
+    const formRow = await pool.query(
+      "SELECT fields_json FROM competition_forms WHERE competition_id = $1",
+      [competitionId]
     );
-    await logAction("Учень подав заявку", req.user.id, `application #${ins.rows[0].id}`);
-    res.status(201).json({ message: "Заявку подано", id: ins.rows[0].id });
+    const fields = formRow.rowCount > 0 && Array.isArray(formRow.rows[0].fields_json) ? formRow.rows[0].fields_json : [];
+    const fileMap = {};
+    (req.files || []).forEach((f) => {
+      fileMap[f.fieldname] = f;
+    });
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i];
+      if (!f.required) continue;
+      if (f.type === "file") {
+        if (!fileMap[`field_${i}`]) {
+          return res.status(400).json({ error: `Завантажте файл: «${f.label}»` });
+        }
+      } else {
+        const val = dataJson[f.label];
+        if (val == null || String(val).trim() === "") {
+          return res.status(400).json({ error: `Заповніть поле: «${f.label}»` });
+        }
+      }
+    }
+
+    const ins = await pool.query(
+      `INSERT INTO applications (competition_id, student_id, section_id, title, data_json, status)
+       VALUES ($1,$2,$3,$4,$5,'submitted') RETURNING id`,
+      [competitionId, req.user.id, sectionId, title, JSON.stringify(dataJson)]
+    );
+    const applicationId = ins.rows[0].id;
+
+    // Зберігаємо завантажені файли
+    for (const file of req.files || []) {
+      await pool.query(
+        `INSERT INTO application_files (application_id, file_url, file_type) VALUES ($1,$2,$3)`,
+        [applicationId, `/uploads/${file.filename}`, file.mimetype]
+      );
+    }
+
+    await logAction("Учень подав заявку", req.user.id, `application #${applicationId}`);
+    res.status(201).json({ message: "Заявку подано", id: applicationId });
   } catch (err) {
     console.log("[v0] Помилка подання заявки учнем:", err.message);
     res.status(500).json({ error: "Внутрішня помилка серверу" });

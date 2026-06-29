@@ -161,25 +161,72 @@ async function loadSections() {
   const compId = $("subCompetition").value;
   if (!compId) {
     $("subSection").innerHTML = `<option value="">—</option>`;
+    $("subFormFields").innerHTML = "";
     return;
   }
   const { sections } = await getJSON(`/api/student/competitions/${compId}/sections`);
   $("subSection").innerHTML =
     `<option value="">Без секції</option>` +
     sections.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join("");
+  await loadFormFields(compId);
+}
+
+// Поля форми, які задав методист під час створення конкурсу
+async function loadFormFields(compId) {
+  const { fields } = await getJSON(`/api/student/competitions/${compId}/form`);
+  if (!fields || !fields.length) {
+    $("subFormFields").innerHTML = "";
+    return;
+  }
+  $("subFormFields").innerHTML = fields
+    .map((f, i) => {
+      const req = f.required ? "required" : "";
+      const star = f.required ? ' <span class="req">*</span>' : "";
+      const id = `field_${i}`;
+      let control = "";
+      if (f.type === "textarea") {
+        control = `<textarea id="${id}" data-label="${esc(f.label)}" rows="4" ${req}></textarea>`;
+      } else if (f.type === "file") {
+        control = `<input type="file" id="${id}" data-label="${esc(f.label)}" data-file="1" name="${id}" ${req} />`;
+      } else {
+        const t = f.type === "number" ? "number" : f.type === "date" ? "date" : "text";
+        control = `<input type="${t}" id="${id}" data-label="${esc(f.label)}" ${req} />`;
+      }
+      return `<label>${esc(f.label)}${star}${control}</label>`;
+    })
+    .join("");
 }
 $("subCompetition").addEventListener("change", loadSections);
 
 $("submitForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = {
-    competition_id: $("subCompetition").value,
-    section_id: $("subSection").value || null,
-    title: $("subTitle").value.trim(),
-  };
-  if (!body.competition_id) return toast("err", "Оберіть конкурс");
-  const { ok, data } = await send("POST", "/api/student/applications", body);
-  if (!ok) return toast("err", data.error || "Помилка");
+  const compId = $("subCompetition").value;
+  if (!compId) return toast("err", "Оберіть конкурс");
+
+  // Збираємо відповіді на поля форми конкурсу
+  const data_json = {};
+  const fd = new FormData();
+  $("subFormFields")
+    .querySelectorAll("[data-label]")
+    .forEach((el) => {
+      const label = el.getAttribute("data-label");
+      if (el.dataset.file) {
+        if (el.files && el.files[0]) {
+          fd.append(el.id, el.files[0]);
+        }
+      } else {
+        data_json[label] = el.value.trim();
+      }
+    });
+
+  fd.append("competition_id", compId);
+  fd.append("section_id", $("subSection").value || "");
+  fd.append("title", $("subTitle").value.trim());
+  fd.append("data_json", JSON.stringify(data_json));
+
+  const res = await fetch("/api/student/applications", { method: "POST", body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return toast("err", data.error || "Помилка");
   toast("ok", data.message);
   $("subTitle").value = "";
   loadSubmit();

@@ -1,6 +1,23 @@
 /* Панель учня VARTA — спільний дизайн із методистом + додаткові стилі */
 @import url("./methodist.css");
 
+/* Динамічні поля форми конкурсу */
+.form-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.form-fields:not(:empty) {
+    padding-top: 4px;
+    border-top: 1px dashed var(--border, #d8dbe3);
+    margin-top: 4px;
+}
+
+.form-fields .req {
+    color: #d92d20;
+}
+
 /* Заголовок панелі з дією */
 .panel-head {
     display: flex;
